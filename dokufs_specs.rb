@@ -74,4 +74,34 @@ describe "a DokuFS" do
 		@dokufs.can_write?("/page.dw").should.be.true
 		@dokufs.can_write?("/test/test/asdf/asdf/page.dw").should.be.true
 	end
+
+	it "should cache a page that was already loaded" do
+		@dokufs.add("/page")
+		@xmlrpc.should.receive(:call).with("wiki.getPage", "page").and_return("Test content")
+		@dokufs.read_file("/page.dw").should.equal("Test content")
+		@dokufs.read_file("/page.dw").should.equal("Test content")
+	end
+
+  it "should expire the cache of page when it is updated" do
+		time = Time.now.utc.to_i
+		@dokufs.add("/page")
+		@xmlrpc.should.receive(:call).with("wiki.getPage", "page").and_return("Test content")
+		@dokufs.read_file("/page.dw").should.equal("Test content")
+		@xmlrpc.spec_reset
+		@xmlrpc.should.receive(:call).with("wiki.getRecentChanges", time).and_return([{"name" => "page"}])
+		@xmlrpc.should.receive(:call).with("wiki.getPage", "page").and_return("New content")
+		@dokufs.update
+		@dokufs.read_file("/page.dw").should.equal("New content")
+	end
+
+	it "should allow to edit a page" do
+		@dokufs.add("/page")
+		@xmlrpc.should.receive(:call).with("wiki.getPage", "page").and_return("Test content")
+		@dokufs.read_file("/page.dw").should.equal("Test content")
+		@xmlrpc.spec_reset
+		@xmlrpc.should.receive(:call).with("wiki.putPage", "page", "New content", {"sum" => "A test edit", "minor" => false}).and_return true
+		@dokufs.write_to("/page.dw", "% A test edit\nNew content").should.be.true
+		@xmlrpc.should.receive(:call).with("wiki.getPage", "page").and_return("New content")
+		@dokufs.read_file("/page.dw")
+	end
 end

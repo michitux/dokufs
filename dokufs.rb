@@ -26,11 +26,62 @@
 # dependency of DokuFS.
 
 # TODO: recognize when save failed
-# TODO: cache for pages - at the moment the performance is very poor especially when using graphical programs...
 
 require "cgi"
 require "fusefs"
 require "xmlrpc/client"
+
+class StringCache < Hash
+	def initialize (maxsize)
+		super()
+		@maxsize = maxsize
+		@lru_keys = []
+	end
+
+	def clear
+		super
+		@lru_keys.clear
+	end
+	
+	def []= (key, value)
+		raise ArgumentError, "Value must be kind of String" unless value.kind_of?(String)
+		remove_lru
+		super
+		touch key
+	end
+
+	def merge! (hash)
+		hash.each { |k,v| self[k] = v }
+	end
+
+	def delete (key)
+		value = super
+		@lru_keys.delete key
+		value
+	end
+
+	protected
+
+	def touch (key)
+		@lru_keys.delete key
+		@lru_keys << key
+	end
+
+	def mem_size
+		result = 0
+		each_value do |v|
+			result += v.size
+		end
+		return result
+	end
+
+	def remove_lru
+		while mem_size >= @maxsize
+			key = @lru_keys.delete_at 0
+			delete key
+		end
+	end
+end
 
 class DokuFS < FuseFS::FuseDir
 	DEFAULT_OPTS = {
@@ -53,6 +104,7 @@ class DokuFS < FuseFS::FuseDir
 			@server = XMLRPC::Client.new3(opts)
 			@is_root = true
 			@last_update = Time.now.utc.to_i
+			@cache = StringCache.new(1024*1024*5)
 			@server.call("wiki.getAllPages").each do |page|
 				self.add("/" + page.gsub(":", "/"))
 			end
@@ -88,7 +140,6 @@ class DokuFS < FuseFS::FuseDir
 	end
 
 	def size(path)
-		puts "size called with #{path}"
 		if directory?(path)
 			return 4000
 		else
@@ -99,7 +150,6 @@ class DokuFS < FuseFS::FuseDir
 	end
 
 	def directory?(path)
-		puts "directory? called with #{path}"
 		base, rest = split_path(path)
 		case
 		when base.nil?
@@ -114,8 +164,10 @@ class DokuFS < FuseFS::FuseDir
 	end
 
 	def file?(path)
-		puts "file? called with #{path}"
-		path.sub!(/\.dw\Z/, "") if self.root?
+		if self.root?
+			return true if @cache.has_key?(path_to_pagename(path))
+			path.sub!(/\.dw\Z/, "")
+		end
 		base, rest = split_path(path)
 		case
 		when base.nil?
@@ -130,17 +182,14 @@ class DokuFS < FuseFS::FuseDir
 	end
 
 	def can_write? path
-		puts "can_write? called with #{path}"
 		!! (path =~ /\.dw\Z/)
 	end
 
 	# mkdir
 	def can_mkdir? path
-		puts "can_mkdir? called with #{path}"
 		return true
 	end
 	def mkdir(path)
-		puts "mkdir called with #{path}"
 		base, rest = split_path(path)
 		case
 		when base.nil?
@@ -157,20 +206,8 @@ class DokuFS < FuseFS::FuseDir
 
 	# Delete a file
 	def can_delete?(path)
-		puts "can_delete? called with #{path}"
-		path.sub!(/\.dw\Z/, "") if self.root?
 		#return false unless Process.uid == FuseFS.reader_uid
-		base, rest = split_path(path)
-		case
-		when base.nil?
-			false
-		when rest.nil?
-			@pages.include?(base)
-		when ! @subdirs.has_key?(base)
-			false
-		else
-			@subdirs[base].can_delete?(rest)
-		end
+    file?(path)
 	end
 	def remove_from_tree(path)
 		base, rest = split_path(path)
@@ -186,18 +223,17 @@ class DokuFS < FuseFS::FuseDir
 			@subdirs[base].remove_from_tree(rest)
 		end
 	end
+
 	def delete(path)
-		puts "delete called with #{path}"
 		path.sub!(/\.dw\Z/, "")
 		@server.call("wiki.putPage", path.gsub("/", ":").reverse.chop.reverse, "", { "sum" => "deleted by DokuFS", "minor" => false })
 		self.remove_from_tree(path)
+		@cache.delete(path_to_pagename(path))
 	end
-
 
 
 	# Delete an existing directory.
 	def can_rmdir?(path)
-		puts "can_rmdir? called with #{path}"
 		#return false unless Process.uid == FuseFS.reader_uid
 		base, rest = split_path(path)
 		if base.nil?
@@ -215,7 +251,6 @@ class DokuFS < FuseFS::FuseDir
 		end
 	end
 	def rmdir(path)
-		puts "rmdir called with #{path}"
 		base, rest = split_path(path)
 		case
 		when base.nil?
@@ -231,15 +266,15 @@ class DokuFS < FuseFS::FuseDir
 	end
 
 	def read_file path
-		puts "read_file called with #{path}"
-		path.sub!(/\.dw\Z/, "")
-		@server.call("wiki.getPage", path.gsub("/", ":").reverse.chop.reverse)
+		pagename = path_to_pagename(path)
+		@cache[pagename] ||= @server.call("wiki.getPage", pagename)
 	end
 
 	def write_to path, content
-		puts "write_to called with #{path}"
+		pagename = path_to_pagename(path)
 		path.sub!(/\.dw\Z/, "")
 		message = { "sum" => "", "minor" => true }
+		plain_content = content
 		if content[0] == "%"[0]
 			content.sub!(/\A%\s?([^\n]+)\n?/m) do
 				message["sum"] = $1
@@ -249,14 +284,14 @@ class DokuFS < FuseFS::FuseDir
 		end
 		if content =~ /\A\s*\Z/m # when the page is empty, it is deleted
 			if message["sum"].empty?
-				message["sum"] = "Deleted"
-				message["minor"] = false
+				return false
 			end
 			self.remove_from_tree(path)
 		else
 			self.add(path)
 		end
-		@server.call("wiki.putPage", path.gsub("/", ":").reverse.chop.reverse, content, message)
+		@cache[pagename] = plain_content
+		@server.call("wiki.putPage", path_to_pagename(path), content, message)
 	end
 
 	def update
@@ -265,12 +300,17 @@ class DokuFS < FuseFS::FuseDir
 		@server.call("wiki.getRecentChanges", ltime).each do |page|
 			path = "/#{page["name"].gsub(":", "/")}"
 			if self.file?(path)
+				@cache.delete(page["name"])
 				self.remove_from_tree(path) if self.read_file(path).empty?
 			else
 				self.add(path)
 			end
 		end
 		return true
+	end
+
+	def path_to_pagename(path)
+		path.sub(/\.dw\Z/, "").gsub(":", "/").reverse.chop.reverse
 	end
 end
 
