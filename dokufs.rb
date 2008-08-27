@@ -42,7 +42,7 @@ class StringCache < Hash
 		super
 		@lru_keys.clear
 	end
-	
+
 	def []= (key, value)
 		raise ArgumentError, "Value must be kind of String" unless value.kind_of?(String)
 		remove_lru
@@ -84,6 +84,14 @@ class StringCache < Hash
 end
 
 class DokuFS < FuseFS::FuseDir
+	AUTH_NONE = 0
+	AUTH_READ = 1
+	AUTH_EDIT = 2
+	AUTH_CREATE = 4
+	AUTH_UPLOAD = 8
+	AUTH_DELETE = 16
+	AUTH_ADMIN = 255
+
 	DEFAULT_OPTS = {
 		:use_ssl => true,
 		:path => "/lib/exe/xmlrpc.php",
@@ -94,8 +102,12 @@ class DokuFS < FuseFS::FuseDir
 		@is_root
 	end
 
+	def media?
+		@is_media
+	end
+
 	def initialize(user_opts = nil)
-		@pages = []
+		@pages = {}
 		@subdirs = {}
 		if ! user_opts.nil?
 			opts = DEFAULT_OPTS
@@ -103,25 +115,50 @@ class DokuFS < FuseFS::FuseDir
 			opts[:path] += "?u=#{CGI.escape(opts[:user])}&p=#{CGI.escape(opts[:password])}" if opts[:user] && opts[:password]
 			@server = XMLRPC::Client.new3(opts)
 			@is_root = true
+			@is_media = opts[:media]
 			@last_update = Time.now.utc.to_i
-			@cache = StringCache.new(1024*1024*5)
-			@server.call("wiki.getAllPages").each do |page|
-				self.add("/" + page.gsub(":", "/"))
+			unless self.media?
+				@cache = StringCache.new(1024*1024*5)
+				@server.call("wiki.getAllPages").each do |page|
+					self.add(pagename_to_path(page['id']), page)
+				end
+			else
+				@server.call("wiki.getAttachments", "", {:recursive => true}).each do |media|
+					self.add(pagename_to_path(media['id']), media)
+				end
 			end
 		end
 	end
 
-	def add(path)
+	def add(path, data)
 		base, rest = split_path(path)
 		case
 		when base.nil?
 			return false
 		when rest.nil?
-			@pages << base unless @pages.include?(base)
+			@pages[base] = data
 		when @subdirs.has_key?(base)
-			@subdirs[base].add(rest)
+			@subdirs[base].add(rest, data)
 		else
-			(@subdirs[base] = self.class.new).add(rest)
+			(@subdirs[base] = self.class.new).add(rest, data)
+		end
+	end
+
+	def getdata(path)
+		base, rest = split_path(path)
+		case
+		when base.nil?
+			false
+		when rest.nil?
+			if @pages.has_key?(base)
+				return @pages[base]
+			else
+				return false
+			end
+		when ! @subdirs.has_key?(base)
+			false
+		else
+			@subdirs[base].getdata(rest)
 		end
 	end
 
@@ -129,7 +166,7 @@ class DokuFS < FuseFS::FuseDir
 		base, rest = split_path(path)
 		case
 		when base.nil?
-			(@pages.collect { |p| p + ".dw" } + @subdirs.keys).sort.uniq
+			(@pages.keys + @subdirs.keys).sort.uniq
 		when ! @subdirs.has_key?(base)
 			nil
 		when rest.nil?
@@ -144,7 +181,7 @@ class DokuFS < FuseFS::FuseDir
 			return 4000
 		else
 			if file?(path)
-				return read_file(path).size
+				return getdata(path)['size']
 			end
 		end
 	end
@@ -164,16 +201,15 @@ class DokuFS < FuseFS::FuseDir
 	end
 
 	def file?(path)
-		if self.root?
+		if (self.root? && ! self.media?)
 			return true if @cache.has_key?(path_to_pagename(path))
-			path.sub!(/\.dw\Z/, "")
 		end
 		base, rest = split_path(path)
 		case
 		when base.nil?
 			false
 		when rest.nil?
-			@pages.include?(base)
+			@pages.has_key?(base)
 		when ! @subdirs.has_key?(base)
 			false
 		else
@@ -182,13 +218,30 @@ class DokuFS < FuseFS::FuseDir
 	end
 
 	def can_write? path
-		!! (path =~ /\.dw\Z/)
+		if file?(path)
+			perms = getdata(path)['perms']
+			if media?
+				return perms >= AUTH_DELETE
+			else
+				return perms >= AUTH_EDIT
+			end
+		else
+			if media?
+				perms = @server.call('wiki.aclCheck', path_to_pagename(path)) 
+				return perms >= AUTH_UPLOAD
+			else
+				return false unless path =~ /\.dw\Z/
+					perms = @server.call('wiki.aclCheck', path_to_pagename(path)) 
+				return perms >= AUTH_CREATE
+			end
+		end
 	end
 
 	# mkdir
 	def can_mkdir? path
 		return true
 	end
+
 	def mkdir(path)
 		base, rest = split_path(path)
 		case
@@ -207,8 +260,18 @@ class DokuFS < FuseFS::FuseDir
 	# Delete a file
 	def can_delete?(path)
 		#return false unless Process.uid == FuseFS.reader_uid
-    file?(path)
+		if file?(path)
+			perms = getdata(path)['perms']
+			if media?
+				return perms >= AUTH_DELETE
+			else
+				return perms >= AUTH_EDIT
+			end
+		else
+			return false
+		end
 	end
+
 	def remove_from_tree(path)
 		base, rest = split_path(path)
 		case
@@ -225,10 +288,13 @@ class DokuFS < FuseFS::FuseDir
 	end
 
 	def delete(path)
-		path.sub!(/\.dw\Z/, "")
-		@server.call("wiki.putPage", path.gsub("/", ":").reverse.chop.reverse, "", { "sum" => "deleted by DokuFS", "minor" => false })
+		if media?
+			@server.call("wiki.deleteAttachment", path_to_pagename(path))
+		else
+			@server.call("wiki.putPage", path_to_pagename(path), "", { "sum" => "deleted by DokuFS", "minor" => false })
+			@cache.delete(path_to_pagename(path))
+		end
 		self.remove_from_tree(path)
-		@cache.delete(path_to_pagename(path))
 	end
 
 
@@ -267,38 +333,61 @@ class DokuFS < FuseFS::FuseDir
 
 	def read_file path
 		pagename = path_to_pagename(path)
-		@cache[pagename] ||= @server.call("wiki.getPage", pagename)
+		if media?
+			XMLRPC::Base64.decode(@server.call("wiki.getAttachment", pagename))
+		else
+			@cache[pagename] ||= @server.call("wiki.getPage", pagename)
+		end
 	end
 
-	def write_to path, content
+	def write_to (path, content)
 		pagename = path_to_pagename(path)
-		path.sub!(/\.dw\Z/, "")
-		message = { "sum" => "", "minor" => true }
-		plain_content = content
-		if content[0] == "%"[0]
-			content.sub!(/\A%\s?([^\n]+)\n?/m) do
-				message["sum"] = $1
-				""
+		if media?
+			begin
+				encoded_content = XMLRPC::Base64.encode(content)
+				@server.call("wiki.putAttachment", pagename, encoded_content, {:overwrite => self.file?(path)})
+				data = {
+					'id' => path_to_pagename(path),
+					'size' => encoded_content.size,
+					'perms' => @server.call('wiki.aclCheck', path_to_pagename(path)),
+				}
+				self.add(path, data)
+			rescue Exception => e
+				puts e.message
 			end
-			message["minor"] = false
-		end
-		if content =~ /\A\s*\Z/m # when the page is empty, it is deleted
-			if message["sum"].empty?
-				return false
-			end
-			self.remove_from_tree(path)
 		else
-			self.add(path)
+			message = { "sum" => "", "minor" => true }
+			plain_content = content
+			if content[0] == "%"[0]
+				content.sub!(/\A%\s?([^\n]+)\n?/m) do
+					message["sum"] = $1
+				""
+				end
+				message["minor"] = false
+			end
+			if content =~ /\A\s*\Z/m # when the page is empty, it is deleted
+				if message["sum"].empty?
+					return false
+				end
+				self.remove_from_tree(path)
+			else
+				data = {
+					'id' => path_to_pagename(path),
+					'size' => plain_content.size,
+					'perms' => @server.call('wiki.aclCheck', path_to_pagename(path)),
+				}
+				self.add(path, data)
+			end
+			@cache[pagename] = plain_content
+			@server.call("wiki.putPage", path_to_pagename(path), content, message)
 		end
-		@cache[pagename] = plain_content
-		@server.call("wiki.putPage", path_to_pagename(path), content, message)
 	end
 
 	def update
 		ltime = @last_update
 		@last_update = Time.now.utc.to_i
 		@server.call("wiki.getRecentChanges", ltime).each do |page|
-			path = "/#{page["name"].gsub(":", "/")}"
+			path = pagename_to_path(page["name"])
 			if self.file?(path)
 				@cache.delete(page["name"])
 				self.remove_from_tree(path) if self.read_file(path).empty?
@@ -311,6 +400,14 @@ class DokuFS < FuseFS::FuseDir
 
 	def path_to_pagename(path)
 		path.sub(/\.dw\Z/, "").gsub(":", "/").reverse.chop.reverse
+	end
+
+	def pagename_to_path(id)
+		if self.media?
+			return '/'+id.gsub(":", "/")
+		else
+			return '/'+id.gsub(":", "/")+'.dw'
+		end
 	end
 end
 
@@ -330,17 +427,21 @@ if (File.basename($0) == File.basename(__FILE__))
 			opts[:path] = ARGV.shift
 		when "-no-ssl"
 			opts[:use_ssl] = false
+		when "-media"
+			opts[:media] = true
 		else
 			if ARGV.empty? && ! arg.nil? && File.directory?(arg)
 				root = DokuFS.new(opts)
 				FuseFS.set_root(root)
 				FuseFS.mount_under(arg)
-				updater = Thread.new do
-					sleep 5*60
-					root.update
+				unless opts[:media]
+					updater = Thread.new do
+						sleep 5*60
+						root.update
+					end
 				end
 				FuseFS.run # This doesn't return until we're unmounted.
-				Thread.exit(updater)
+				Thread.exit(updater) unless opts[:media]
 			else
 				puts <<-EOF
 With DokuFS you can mount a DokuWiki under a path in your filesystem
