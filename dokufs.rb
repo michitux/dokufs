@@ -106,6 +106,10 @@ class DokuFS < FuseFS::FuseDir
 		@is_media
 	end
 
+	def use_cache?
+		@use_cache
+	end
+
 	def initialize(user_opts = nil)
 		@pages = {}
 		@subdirs = {}
@@ -116,17 +120,26 @@ class DokuFS < FuseFS::FuseDir
 			@server = XMLRPC::Client.new3(opts)
 			@is_root = true
 			@is_media = opts[:media]
-			@last_update = Time.now.utc.to_i
+			@use_cache = !opts[:nocache] && !@is_media
 			unless self.media?
-				@cache = StringCache.new(1024*1024*5)
+				@cache = StringCache.new(1024*1024*5) if @use_cache
 				@server.call("wiki.getAllPages").each do |page|
 					self.add(pagename_to_path(page['id']), page)
+					# set the last-update-timestamp to the most recently updated page
+					# as we can't rely that the local time is in sync with server time
+					if (!@last_update || @last_update < page['lastModified'].to_time)
+						@last_update = page['lastModified'].to_time
+					end
 				end
 			else
 				@server.call("wiki.getAttachments", "", {:recursive => true}).each do |media|
 					self.add(pagename_to_path(media['id']), media)
+					if (!@last_update || @last_update < media['lastModified'].to_time)
+						@last_update = media['lastModified'].to_time
+					end
 				end
 			end
+			@last_update ||= Time.now.utc.to_i
 		end
 	end
 
@@ -201,7 +214,7 @@ class DokuFS < FuseFS::FuseDir
 	end
 
 	def file?(path)
-		if (self.root? && ! self.media?)
+		if (self.root? && ! self.media? && self.use_cache?)
 			return true if @cache.has_key?(path_to_pagename(path))
 		end
 		base, rest = split_path(path)
@@ -292,7 +305,7 @@ class DokuFS < FuseFS::FuseDir
 			@server.call("wiki.deleteAttachment", path_to_pagename(path))
 		else
 			@server.call("wiki.putPage", path_to_pagename(path), "", { "sum" => "deleted by DokuFS", "minor" => false })
-			@cache.delete(path_to_pagename(path))
+			@cache.delete(path_to_pagename(path)) if self.use_cache?
 		end
 		self.remove_from_tree(path)
 	end
@@ -333,10 +346,18 @@ class DokuFS < FuseFS::FuseDir
 
 	def read_file path
 		pagename = path_to_pagename(path)
-		if media?
-			XMLRPC::Base64.decode(@server.call("wiki.getAttachment", pagename))
-		else
-			@cache[pagename] ||= @server.call("wiki.getPage", pagename)
+		begin 
+			if media?
+				XMLRPC::Base64.decode(@server.call("wiki.getAttachment", pagename))
+			else
+				if (self.use_cache?)
+					@cache[pagename] ||= @server.call("wiki.getPage", pagename)
+				else
+					@server.call("wiki.getPage", pagename)
+				end
+			end
+		rescue XMLRPC::FaultException => e
+			return ""
 		end
 	end
 
@@ -361,7 +382,7 @@ class DokuFS < FuseFS::FuseDir
 			if content[0] == "%"[0]
 				content.sub!(/\A%\s?([^\n]+)\n?/m) do
 					message["sum"] = $1
-				""
+					""
 				end
 				message["minor"] = false
 			end
@@ -378,28 +399,33 @@ class DokuFS < FuseFS::FuseDir
 				}
 				self.add(path, data)
 			end
-			@cache[pagename] = plain_content
+			@cache[pagename] = plain_content if self.use_cache?
 			@server.call("wiki.putPage", path_to_pagename(path), content, message)
 		end
 	end
 
 	def update
-		ltime = @last_update
-		@last_update = Time.now.utc.to_i
-		@server.call("wiki.getRecentChanges", ltime).each do |page|
-			path = pagename_to_path(page["name"])
-			if self.file?(path)
-				@cache.delete(page["name"])
-				self.remove_from_tree(path) if self.read_file(path).empty?
-			else
-				self.add(path)
+		begin
+			update_command = "wiki.getRecent" + (self.media? ? "Media" : "") + "Changes";
+			@server.call(update_command, @last_update).each do |page|
+				path = pagename_to_path(page["name"])
+				if (page['lastModified'].to_time > @last_update)
+					@last_update = page['lastModified'].to_time
+				end
+				if self.file?(path)
+					@cache.delete(page["name"]) unless self.use_cache?
+					self.remove_from_tree(path) if self.read_file(path).empty?
+				else
+					self.add(path, page)
+				end
 			end
+		rescue XMLRPC::FaultException => e
 		end
 		return true
 	end
 
 	def path_to_pagename(path)
-		path.sub(/\.dw\Z/, "").gsub(":", "/").reverse.chop.reverse
+		path.sub(/\.dw\Z/, "").gsub("/", ":").reverse.chop.reverse
 	end
 
 	def pagename_to_path(id)
@@ -429,27 +455,45 @@ if (File.basename($0) == File.basename(__FILE__))
 			opts[:use_ssl] = false
 		when "-media"
 			opts[:media] = true
+		when "-no-cache"
+			opts[:nocache] = true
+		when "-update-interval"
+			opts[:update_interval] = ARGV.shift.to_i
 		else
-			if ARGV.empty? && ! arg.nil? && File.directory?(arg)
+			if ARGV.empty? && !arg.nil? && File.directory?(arg)
 				root = DokuFS.new(opts)
 				FuseFS.set_root(root)
 				FuseFS.mount_under(arg)
 				unless opts[:media]
 					updater = Thread.new do
-						sleep 5*60
+						if (opts[:update_interval])
+							sleep opts[:update_interval]
+						else
+							sleep 5*60
+						end
 						root.update
 					end
 				end
 				FuseFS.run # This doesn't return until we're unmounted.
 				Thread.exit(updater) unless opts[:media]
 			else
+				if (!File.directory?(arg))
+					puts arg+': directory not found. Please specify an existing directory as last argument.'
+				end
 				puts <<-EOF
 With DokuFS you can mount a DokuWiki under a path in your filesystem
 
 All arguments except the path where to mount are optional, defaults are ssl, localhost as server and /lib/exe/xmlrpc.php as path. No authentication is default.
 
-Usage: dokufs.rb [-user your_username -password your_password] [-server your_server.com] [-path your/path/to/lib/exe/xmlrpc.php] [-no-ssl] path/where/to/mount/
+The -media-flag indicates if DokuFS should work in media-mode, that means it will display all media files instead of wiki-pages. Upload of media-files is possible.
+
+The -no-cache-flag deactivates the cache for files (note: this will cause significantly more requests to the server).
+
+The -update-interval-option allows you to specify an interval in seconds after which the server is contacted in order to fetch all changes. If the cache is deactivated this will only affect the directory structure.
+
+Usage: dokufs.rb [-media] [-nocache] [-update-interval seconds_between_updates] [-user your_username -password your_password] [-server your_server.com] [-path your/path/to/lib/exe/xmlrpc.php] [-no-ssl] path/where/to/mount/
 				EOF
+				exit;
 			end
 		end
 	end while arg != nil
