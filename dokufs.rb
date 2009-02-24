@@ -1,10 +1,10 @@
 #!/usr/bin/ruby
 # DokuFS
-# A Filesystem for accessing DokuWiki (version 2008-05-05 or above)
+# A Filesystem for accessing DokuWiki (version 2009-02-14 or above)
 # on your local filesystem. More information can be found on 
 # http://www.content-space.de/go/dokufs
 #
-# Copyright (C) 2008  Michael Hamann  michael <at> content-space.de
+# Copyright (C) 2009  Michael Hamann  michael <at> content-space.de
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -245,7 +245,7 @@ class DokuFS < FuseFS::FuseDir
 				return perms >= AUTH_UPLOAD
 			else
 				return false unless path =~ /\.dw\Z/
-					perms = @server.call('wiki.aclCheck', path_to_pagename(path)) 
+				perms = @server.call('wiki.aclCheck', path_to_pagename(path)) 
 				return perms >= AUTH_CREATE
 			end
 		end
@@ -370,7 +370,7 @@ class DokuFS < FuseFS::FuseDir
 				@server.call("wiki.putAttachment", pagename, encoded_content, {:overwrite => self.file?(path)})
 				data = {
 					'id' => path_to_pagename(path),
-					'size' => encoded_content.size,
+					'size' => content.size,
 					'perms' => @server.call('wiki.aclCheck', path_to_pagename(path)),
 				}
 				self.add(path, data)
@@ -415,7 +415,11 @@ class DokuFS < FuseFS::FuseDir
 				end
 				if self.file?(path)
 					@cache.delete(page["name"]) unless self.use_cache?
-					self.remove_from_tree(path) if self.read_file(path).empty?
+					if self.read_file(path).empty?
+						self.remove_from_tree(path)
+					else
+						self.add(path, page)
+					end
 				else
 					self.add(path, page)
 				end
