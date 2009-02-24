@@ -140,7 +140,16 @@ class DokuFS < FuseFS::FuseDir
 					end
 				end
 			end
-			@last_update ||= Time.now.utc.to_i
+
+			# @last_update is a UTC time object, but in fact it is the server local time...
+			# But the difference between this time we have and UTC on the server can be at
+			# maximum twelve hours. This is why twelve hours are subtracted from the reported
+			# last change timestamp.
+			if @last_update
+				@last_update = @last_update.to_i - 12*60*60
+			else 
+				@last_update = Time.now.to_i
+			end
 		end
 	end
 
@@ -408,23 +417,34 @@ class DokuFS < FuseFS::FuseDir
 	def update
 		begin
 			update_command = "wiki.getRecent" + (self.media? ? "Media" : "") + "Changes";
+
 			@server.call(update_command, @last_update).each do |page|
 				path = pagename_to_path(page["name"])
-				if (page['lastModified'].to_time > @last_update)
-					@last_update = page['lastModified'].to_time
+				if (page['version'] > @last_update)
+					@last_update = page['version']
 				end
+
+				if self.media? && page["size"] == false
+					# there is a tiny and really stupid bug in the current stable release
+					# of dokuwiki that prevents media size from being calculated...
+					page["size"] = self.read_file(path).size()
+				end
+
 				if self.file?(path)
-					@cache.delete(page["name"]) unless self.use_cache?
-					if self.read_file(path).empty?
+					if page["size"] == 0
+						@cache.delete(page["name"]) if self.use_cache?
 						self.remove_from_tree(path)
 					else
 						self.add(path, page)
 					end
 				else
-					self.add(path, page)
+					if page["size"] > 0
+						self.add(path, page)
+					end
 				end
 			end
 		rescue XMLRPC::FaultException => e
+			puts e.to_h.inspect
 		end
 		return true
 	end
@@ -472,12 +492,14 @@ if (File.basename($0) == File.basename(__FILE__))
 		FuseFS.set_root(root)
 		FuseFS.mount_under(arg)
 		updater = Thread.new do
-			if (options[:update_interval])
-				sleep options[:update_interval]
-			else
-				sleep 5*60
+			while true
+				if (options[:update_interval])
+					sleep options[:update_interval]
+				else
+					sleep 5*60
+				end
+				root.update
 			end
-			root.update
 		end
 		FuseFS.run # This doesn't return until we're unmounted.
 		Thread.exit(updater)
