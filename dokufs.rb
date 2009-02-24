@@ -30,6 +30,7 @@
 require "cgi"
 require "fusefs"
 require "xmlrpc/client"
+require "optparse"
 
 class StringCache < Hash
 	def initialize (maxsize)
@@ -438,63 +439,47 @@ class DokuFS < FuseFS::FuseDir
 end
 
 if (File.basename($0) == File.basename(__FILE__))
-	Thread.abort_on_exception = true # for debugging...
-	opts = {}
-	begin
-		arg = ARGV.shift
-		case arg
-		when "-user"
-			opts[:user] = ARGV.shift
-		when "-password"
-			opts[:password] = ARGV.shift
-		when "-server"
-			opts[:host] = ARGV.shift
-		when "-path"
-			opts[:path] = ARGV.shift
-		when "-no-ssl"
-			opts[:use_ssl] = false
-		when "-media"
-			opts[:media] = true
-		when "-no-cache"
-			opts[:nocache] = true
-		when "-update-interval"
-			opts[:update_interval] = ARGV.shift.to_i
-		else
-			if ARGV.empty? && !arg.nil? && File.directory?(arg)
-				root = DokuFS.new(opts)
-				FuseFS.set_root(root)
-				FuseFS.mount_under(arg)
-				unless opts[:media]
-					updater = Thread.new do
-						if (opts[:update_interval])
-							sleep opts[:update_interval]
-						else
-							sleep 5*60
-						end
-						root.update
-					end
-				end
-				FuseFS.run # This doesn't return until we're unmounted.
-				Thread.exit(updater) unless opts[:media]
-			else
-				if (!File.directory?(arg))
-					puts arg+': directory not found. Please specify an existing directory as last argument.'
-				end
-				puts <<-EOF
-With DokuFS you can mount a DokuWiki under a path in your filesystem
+	#Thread.abort_on_exception = true # for debugging...
+	options = {}
 
-All arguments except the path where to mount are optional, defaults are ssl, localhost as server and /lib/exe/xmlrpc.php as path. No authentication is default.
+	OptionParser.new do |opts|
+		opts.banner = "Mount a DokuWiki over XML-RPC as filesystem under a directory.\n\nUsage: dokufs.rb [options] directory"
 
-The -media-flag indicates if DokuFS should work in media-mode, that means it will display all media files instead of wiki-pages. Upload of media-files is possible.
-
-The -no-cache-flag deactivates the cache for files (note: this will cause significantly more requests to the server).
-
-The -update-interval-option allows you to specify an interval in seconds after which the server is contacted in order to fetch all changes. If the cache is deactivated this will only affect the directory structure.
-
-Usage: dokufs.rb [-media] [-nocache] [-update-interval seconds_between_updates] [-user your_username -password your_password] [-server your_server.com] [-path your/path/to/lib/exe/xmlrpc.php] [-no-ssl] path/where/to/mount/
-				EOF
-				exit;
-			end
+		opts.on("-u", "--user USER", "The username") {|options[:user]|}
+		opts.on("-p", "--password PASSWORD", "The password") {|options[:password]|}
+		opts.on("-s", "--server SERVER", "The server to use (default: localhost)") {|options[:host]|}
+		opts.on("--path PATH", "The path to XMLRPC (default: /lib/exe/xmlrpc.php)") {|options[:path]|}
+		opts.on("--[no-]ssl", "Use (no) ssl (default: use ssl)") {|options[:use_ssl]|}
+		opts.on("-m", "--media", "Display media files instead of wiki pages") {|options[:media]|}
+		opts.on("--update-interval INTERVAL", Integer, "The update interval in seconds") {|options[:update_interval]|}
+		opts.on("-n", "--no-cache", "Don't use the cache - this will cause a significantly higher load on the server. (default: use cache)") do |c|
+			options[:nocache] = !c
 		end
-	end while arg != nil
+
+		opts.on_tail("-h", "--help", "Show this message") do
+			puts opts
+			exit
+		end
+	end.parse!
+
+	arg = ARGV.shift
+	if ARGV.empty? && !arg.nil? && File.directory?(arg)
+		root = DokuFS.new(options)
+		FuseFS.set_root(root)
+		FuseFS.mount_under(arg)
+		updater = Thread.new do
+			if (options[:update_interval])
+				sleep options[:update_interval]
+			else
+				sleep 5*60
+			end
+			root.update
+		end
+		FuseFS.run # This doesn't return until we're unmounted.
+		Thread.exit(updater)
+	else
+		print arg unless arg.nil?
+		puts ': directory not found. Please specify an existing directory as last argument.'
+		puts 'Call dokufs.rb -h for more usage information'
+	end
 end
