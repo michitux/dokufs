@@ -397,6 +397,9 @@ class DokuFS < FuseFS::FuseDir
 				message["minor"] = false
 			end
 			if content =~ /\A\s*\Z/m # when the page is empty, it is deleted
+				# Editors like vi save first an empty file and then a new version
+				# when updating a file... This is why we ignore completely empty
+				# files although that might cause some unexpected behaviours...
 				if message["sum"].empty?
 					return false
 				end
@@ -431,8 +434,8 @@ class DokuFS < FuseFS::FuseDir
 				end
 
 				if self.file?(path)
+					@cache.delete(page["name"]) if self.use_cache?
 					if page["size"] == 0
-						@cache.delete(page["name"]) if self.use_cache?
 						self.remove_from_tree(path)
 					else
 						self.add(path, page)
