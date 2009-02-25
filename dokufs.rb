@@ -434,11 +434,13 @@ class DokuFS < FuseFS::FuseDir
 				end
 
 				if self.file?(path)
-					@cache.delete(page["name"]) if self.use_cache?
-					if page["size"] == 0
-						self.remove_from_tree(path)
-					else
-						self.add(path, page)
+					if self.getdata(path) != page
+						@cache.delete(page["name"]) if self.use_cache?
+						if page["size"] == 0
+							self.remove_from_tree(path)
+						else
+							self.add(path, page)
+						end
 					end
 				else
 					if page["size"] > 0
