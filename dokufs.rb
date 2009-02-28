@@ -117,7 +117,7 @@ class DokuFS < FuseFS::FuseDir
 		if ! user_opts.nil?
 			opts = DEFAULT_OPTS
 			opts.merge!(user_opts)
-			opts[:path] += "?u=#{CGI.escape(opts[:user])}&p=#{CGI.escape(opts[:password])}" if opts[:user] && opts[:password]
+			opts[:path] += "?u=#{CGI.escape(opts[:user])}&p=#{CGI.escape(opts[:password])}" if opts[:user] && opts[:password] && !opts[:http_basic_auth]
 			@server = XMLRPC::Client.new3(opts)
 			@is_root = true
 			@is_media = opts[:media]
@@ -481,6 +481,7 @@ if (File.basename($0) == File.basename(__FILE__))
 		opts.on("--[no-]ssl", "Use (no) ssl (default: use ssl)") {|options[:use_ssl]|}
 		opts.on("-m", "--media", "Display media files instead of wiki pages") {|options[:media]|}
 		opts.on("--update-interval INTERVAL", Integer, "The update interval in seconds") {|options[:update_interval]|}
+		opts.on("--http-basic-auth", "Use http basic auth instead of transferring the login credentials as get parameters") {|options[:http_basic_auth]|}
 		opts.on("-n", "--no-cache", "Don't use the cache - this will cause a significantly higher load on the server. (default: use cache)") do |c|
 			options[:nocache] = !c
 		end
