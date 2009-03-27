@@ -475,7 +475,7 @@ if (File.basename($0) == File.basename(__FILE__))
 		opts.banner = "Mount a DokuWiki over XML-RPC as filesystem under a directory.\n\nUsage: dokufs.rb [options] directory"
 
 		opts.on("-u", "--user USER", "The username") {|options[:user]|}
-		opts.on("-p", "--password PASSWORD", "The password") {|options[:password]|}
+		opts.on("-p", "--password PASSWORD", "The password (optional, if you specify a username without password, you will be prompted for it)") {|options[:password]|}
 		opts.on("-s", "--server SERVER", "The server to use (default: localhost)") {|options[:host]|}
 		opts.on("--path PATH", "The path to XMLRPC (default: /lib/exe/xmlrpc.php)") {|options[:path]|}
 		opts.on("--[no-]ssl", "Use (no) ssl (default: use ssl)") {|options[:use_ssl]|}
@@ -494,6 +494,17 @@ if (File.basename($0) == File.basename(__FILE__))
 
 	arg = ARGV.shift
 	if ARGV.empty? && !arg.nil? && File.directory?(arg)
+		if (options[:user] && !options[:password])
+			begin
+				require 'rubygems'
+				require 'highline/import'
+				options[:password] = ask('Password: ') { |q| q.echo = false }
+			rescue LoadError
+				puts 'Couldn\'t find highline, but it is required for hidden password input.'
+				print 'Password: '
+				options[:password] = gets
+			end
+		end
 		root = DokuFS.new(options)
 		FuseFS.set_root(root)
 		FuseFS.mount_under(arg)
