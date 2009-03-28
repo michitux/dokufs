@@ -472,10 +472,40 @@ if (File.basename($0) == File.basename(__FILE__))
 	options = {}
 
 	OptionParser.new do |opts|
-		opts.banner = "Mount a DokuWiki over XML-RPC as filesystem under a directory.\n\nUsage: dokufs.rb [options] directory"
+		opts.banner = <<EOS
+Mount a DokuWiki over XML-RPC as filesystem under a directory.
 
+Usage: dokufs.rb [options]
+
+You can create a configuration file in $HOME/.dokufsrc that can contain all
+arguments that are specified here (note: some are named a bit differently,
+please look in the example for the correct names) and that obeys to the YAML
+syntax. With it you can specify as many profiles as you want. Values provided
+as additional arguments overwrite values from the profile. Everything in the
+profile is optional but the directory if it isn't specified on the commandline.
+Note: it is recommend to remove all reading privileges from the configuration
+file except the one for the owner if there are any passwords in the
+configuration file.
+Example:
+
+test:
+  :directory: /home/user/dokuwiki
+  :host: example.com
+  :path: /dokuwiki/lib/exe/xmlrpc.php
+  :user: testuser
+  :password: password
+  :use_ssl: false
+  :media: true
+  :update_interval: 20
+  :http_basic_auth: true
+  :nocache: true
+
+EOS
+
+    opts.on("-p", "--profile PROFILE", "A profile in ~/.dokufsrc") {|options[:profile]|}
+    opts.on("-d", "--directory DIRECTORY", "The directory where the filesystem shall be mounted (required if no profile given)") {|options[:directory]|}
 		opts.on("-u", "--user USER", "The username") {|options[:user]|}
-		opts.on("-p", "--password PASSWORD", "The password (optional, if you specify a username without password, you will be prompted for it)") {|options[:password]|}
+		opts.on("--password PASSWORD", "The password (optional, if you specify a username without password, you will be prompted for it)") {|options[:password]|}
 		opts.on("-s", "--server SERVER", "The server to use (default: localhost)") {|options[:host]|}
 		opts.on("--path PATH", "The path to XMLRPC (default: /lib/exe/xmlrpc.php)") {|options[:path]|}
 		opts.on("--[no-]ssl", "Use (no) ssl (default: use ssl)") {|options[:use_ssl]|}
@@ -483,7 +513,7 @@ if (File.basename($0) == File.basename(__FILE__))
 		opts.on("--update-interval INTERVAL", Integer, "The update interval in seconds") {|options[:update_interval]|}
 		opts.on("--http-basic-auth", "Use http basic auth instead of transferring the login credentials as get parameters") {|options[:http_basic_auth]|}
 		opts.on("-n", "--no-cache", "Don't use the cache - this will cause a significantly higher load on the server. (default: use cache)") do |c|
-			options[:nocache] = !c
+			options[:nocache] = c
 		end
 
 		opts.on_tail("-h", "--help", "Show this message") do
@@ -492,37 +522,53 @@ if (File.basename($0) == File.basename(__FILE__))
 		end
 	end.parse!
 
-	arg = ARGV.shift
-	if ARGV.empty? && !arg.nil? && File.directory?(arg)
-		if (options[:user] && !options[:password])
-			begin
-				require 'rubygems'
-				require 'highline/import'
-				options[:password] = ask('Password: ') { |q| q.echo = false }
-			rescue LoadError
-				puts 'Couldn\'t find highline, but it is required for hidden password input.'
-				print 'Password: '
-				options[:password] = gets
-			end
-		end
-		root = DokuFS.new(options)
-		FuseFS.set_root(root)
-		FuseFS.mount_under(arg)
-		updater = Thread.new do
-			while true
-				if (options[:update_interval])
-					sleep options[:update_interval]
-				else
-					sleep 5*60
-				end
-				root.update
-			end
-		end
-		FuseFS.run # This doesn't return until we're unmounted.
-		Thread.exit(updater)
-	else
-		print arg unless arg.nil?
-		puts ': directory not found. Please specify an existing directory as last argument.'
-		puts 'Call dokufs.rb -h for more usage information'
-	end
+  if (options[:profile])
+    if (File.file?(ENV['HOME']+'/.dokufsrc') and File.readable?(ENV['HOME']+'/.dokufsrc'))
+      require 'yaml'
+      profiles = YAML.load_file(ENV['HOME']+'/.dokufsrc')
+      if (profiles.has_key?(options[:profile]))
+        options = profiles[options[:profile]].merge(options)
+      else
+        puts "No profile found with the specified name"
+        exit 1
+      end
+    else
+      puts "No configuration file found or file not readable"
+      exit 1
+    end
+  end
+  if (!options[:directory] || !File.directory?(options[:directory]))
+    puts "Directory not given or not found!"
+    exit 1
+  end
+  if (options[:user] && !options[:password])
+    begin
+      require 'rubygems'
+      require 'highline/import'
+      options[:password] = ask('Password: ') { |q| q.echo = false }
+    rescue LoadError
+      puts 'Couldn\'t find highline, but it is required for hidden password input.'
+      print 'Password: '
+      options[:password] = gets
+    end
+  end
+  root = DokuFS.new(options)
+  FuseFS.set_root(root)
+  FuseFS.mount_under(options[:directory])
+  updater = Thread.new do
+    while true
+      if (options[:update_interval])
+        sleep options[:update_interval]
+      else
+        sleep 5*60
+      end
+      root.update
+    end
+  end
+  FuseFS.run # This doesn't return until we're unmounted.
+  Thread.exit(updater)
+else
+  print arg unless arg.nil?
+  puts ': directory not found. Please specify an existing directory as last argument.'
+  puts 'Call dokufs.rb -h for more usage information'
 end
