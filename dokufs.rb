@@ -96,7 +96,8 @@ class DokuFS < FuseFS::FuseDir
 	DEFAULT_OPTS = {
 		:use_ssl => true,
 		:path => "/lib/exe/xmlrpc.php",
-		:host => "localhost"
+		:host => "localhost",
+		:ssl_verify => true
 	}
 
 	def root?
@@ -119,6 +120,7 @@ class DokuFS < FuseFS::FuseDir
 			opts.merge!(user_opts)
 			opts[:path] += "?u=#{CGI.escape(opts[:user])}&p=#{CGI.escape(opts[:password])}" if opts[:user] && opts[:password] && !opts[:http_basic_auth]
 			@server = XMLRPC::Client.new3(opts)
+			@server.instance_variable_get(:@http).instance_variable_set(:@verify_mode, OpenSSL::SSL::VERIFY_NONE) unless (opts[:ssl_verify])
 			@is_root = true
 			@is_media = opts[:media]
 			@use_cache = !opts[:nocache] && !@is_media
@@ -502,19 +504,20 @@ test:
 
 EOS
 
-    opts.on("-p", "--profile PROFILE", "A profile in ~/.dokufsrc") {|options[:profile]|}
-    opts.on("-d", "--directory DIRECTORY", "The directory where the filesystem shall be mounted (required if no profile given)") {|options[:directory]|}
-		opts.on("-u", "--user USER", "The username") {|options[:user]|}
-		opts.on("--password PASSWORD", "The password (optional, if you specify a username without password, you will be prompted for it)") {|options[:password]|}
-		opts.on("-s", "--server SERVER", "The server to use (default: localhost)") {|options[:host]|}
-		opts.on("--path PATH", "The path to XMLRPC (default: /lib/exe/xmlrpc.php)") {|options[:path]|}
-		opts.on("--[no-]ssl", "Use (no) ssl (default: use ssl)") {|options[:use_ssl]|}
-		opts.on("-m", "--media", "Display media files instead of wiki pages") {|options[:media]|}
-		opts.on("--update-interval INTERVAL", Integer, "The update interval in seconds") {|options[:update_interval]|}
-		opts.on("--http-basic-auth", "Use http basic auth instead of transferring the login credentials as get parameters") {|options[:http_basic_auth]|}
+		opts.on("-p", "--profile PROFILE", "A profile in ~/.dokufsrc") {|v| options[:profile] = v }
+		opts.on("-d", "--directory DIRECTORY", "The directory where the filesystem shall be mounted (required if no profile given)") {|v| options[:directory] = v}
+		opts.on("-u", "--user USER", "The username") {|v| options[:user] = v}
+		opts.on("--password PASSWORD", "The password (optional, if you specify a username without password, you will be prompted for it)") {|v| options[:password] = v}
+		opts.on("-s", "--server SERVER", "The server to use (default: localhost)") {|v| options[:host] = v}
+		opts.on("--path PATH", "The path to XMLRPC (default: /lib/exe/xmlrpc.php)") {|v| options[:path] = v}
+		opts.on("--[no-]ssl", "Use (no) ssl (default: use ssl)") {|v| options[:use_ssl] = v}
+		opts.on("-m", "--media", "Display media files instead of wiki pages") {|v| options[:media] = v}
+		opts.on("--update-interval INTERVAL", Integer, "The update interval in seconds") {|v| options[:update_interval] = v}
+		opts.on("--http-basic-auth", "Use http basic auth instead of transferring the login credentials as get parameters") {|v| options[:http_basic_auth] = v}
 		opts.on("-n", "--no-cache", "Don't use the cache - this will cause a significantly higher load on the server. (default: use cache)") do |c|
 			options[:nocache] = c
 		end
+		opts.on("--no-ssl-verify", "Disable the SSL certificate verification") {|v| options[:ssl_verify] = v }
 
 		opts.on_tail("-h", "--help", "Show this message") do
 			puts opts
