@@ -501,6 +501,7 @@ test:
   :update_interval: 20
   :http_basic_auth: true
   :nocache: true
+  :ssl_verify: false
 
 EOS
 
@@ -525,53 +526,53 @@ EOS
 		end
 	end.parse!
 
-  if (options[:profile])
-    if (File.file?(ENV['HOME']+'/.dokufsrc') and File.readable?(ENV['HOME']+'/.dokufsrc'))
-      require 'yaml'
-      profiles = YAML.load_file(ENV['HOME']+'/.dokufsrc')
-      if (profiles.has_key?(options[:profile]))
-        options = profiles[options[:profile]].merge(options)
-      else
-        puts "No profile found with the specified name"
-        exit 1
-      end
-    else
-      puts "No configuration file found or file not readable"
-      exit 1
-    end
-  end
-  if (!options[:directory] || !File.directory?(options[:directory]))
-    puts "Directory not given or not found!"
-    exit 1
-  end
-  if (options[:user] && !options[:password])
-    begin
-      require 'rubygems'
-      require 'highline/import'
-      options[:password] = ask('Password: ') { |q| q.echo = false }
-    rescue LoadError
-      puts 'Couldn\'t find highline, but it is required for hidden password input.'
-      print 'Password: '
-      options[:password] = gets
-    end
-  end
-  root = DokuFS.new(options)
-  FuseFS.set_root(root)
-  FuseFS.mount_under(options[:directory])
-  updater = Thread.new do
-    while true
-      if (options[:update_interval])
-        sleep options[:update_interval]
-      else
-        sleep 5*60
-      end
-      root.update
-    end
-  end
-  FuseFS.run # This doesn't return until we're unmounted.
-  Thread.exit(updater)
+	if (options[:profile])
+		if (File.file?(ENV['HOME']+'/.dokufsrc') and File.readable?(ENV['HOME']+'/.dokufsrc'))
+			require 'yaml'
+			profiles = YAML.load_file(ENV['HOME']+'/.dokufsrc')
+			if (profiles.has_key?(options[:profile]))
+				options = profiles[options[:profile]].merge(options)
+			else
+				puts "No profile found with the specified name"
+				exit 1
+			end
+		else
+			puts "No configuration file found or file not readable"
+			exit 1
+		end
+	end
+	if (!options[:directory] || !File.directory?(options[:directory]))
+		puts "Directory not given or not found!"
+		exit 1
+	end
+	if (options[:user] && !options[:password])
+		begin
+			require 'rubygems'
+			require 'highline/import'
+			options[:password] = ask('Password: ') { |q| q.echo = false }
+		rescue LoadError
+			puts 'Couldn\'t find highline, but it is required for hidden password input.'
+			print 'Password: '
+			options[:password] = gets
+		end
+	end
+	root = DokuFS.new(options)
+	FuseFS.set_root(root)
+	FuseFS.mount_under(options[:directory])
+	updater = Thread.new do
+		while true
+			if (options[:update_interval])
+				sleep options[:update_interval]
+			else
+				sleep 5*60
+			end
+			root.update
+		end
+	end
+	FuseFS.run # This doesn't return until we're unmounted.
+	Thread.exit(updater)
 else
-  print arg unless arg.nil?
-  puts ': directory not found. Please specify an existing directory as last argument.'
-  puts 'Call dokufs.rb -h for more usage information'
+	print arg unless arg.nil?
+	puts ': directory not found. Please specify an existing directory as last argument.'
+	puts 'Call dokufs.rb -h for more usage information'
 end
