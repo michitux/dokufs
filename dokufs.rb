@@ -97,7 +97,8 @@ class DokuFS < FuseFS::FuseDir
 		:use_ssl => true,
 		:path => "/lib/exe/xmlrpc.php",
 		:host => "localhost",
-		:ssl_verify => true
+		:ssl_verify => true,
+		:login_method => :cookie
 	}
 
 	def root?
@@ -118,12 +119,26 @@ class DokuFS < FuseFS::FuseDir
 		if ! user_opts.nil?
 			opts = DEFAULT_OPTS
 			opts.merge!(user_opts)
-			opts[:path] += "?u=#{CGI.escape(opts[:user])}&p=#{CGI.escape(opts[:password])}" if opts[:user] && opts[:password] && !opts[:http_basic_auth]
-			@server = XMLRPC::Client.new3(opts)
+			xmlrpc_opts = { :host => opts[:host], :path => opts[:path] }
+			if opts[:user] and opts[:password]
+				case opts[:login_method]
+				when :url
+					xmlrpc_opts[:path] += "?u=#{CGI.escape(opts[:user])}&p=#{CGI.escape(opts[:password])}"
+				when :http
+					xmlrpc_opts[:user] = opts[:user]
+					xmlrpc_opts[:password] = opts[:password]
+				end
+			end
+			@server = XMLRPC::Client.new3(xmlrpc_opts)
 			@server.instance_variable_get(:@http).instance_variable_set(:@verify_mode, OpenSSL::SSL::VERIFY_NONE) unless (opts[:ssl_verify])
 			@is_root = true
 			@is_media = opts[:media]
 			@use_cache = !opts[:nocache] && !@is_media
+			if opts[:login_method] == :cookie && opts[:user] && opts[:password]
+				unless @server.call("dokuwiki.login", opts[:user], opts[:password])
+					raise ArgumentError, "Login failed, wrong username or password"
+				end
+			end
 			unless self.media?
 				@cache = StringCache.new(1024*1024*5) if @use_cache
 				@server.call("wiki.getAllPages").each do |page|
@@ -499,7 +514,7 @@ test:
   :use_ssl: false
   :media: true
   :update_interval: 20
-  :http_basic_auth: true
+  :login_method: cookie
   :nocache: true
   :ssl_verify: false
 
@@ -514,7 +529,8 @@ EOS
 		opts.on("--[no-]ssl", "Use (no) ssl (default: use ssl)") {|v| options[:use_ssl] = v}
 		opts.on("-m", "--media", "Display media files instead of wiki pages") {|v| options[:media] = v}
 		opts.on("--update-interval INTERVAL", Integer, "The update interval in seconds") {|v| options[:update_interval] = v}
-		opts.on("--http-basic-auth", "Use http basic auth instead of transferring the login credentials as get parameters") {|v| options[:http_basic_auth] = v}
+		opts.on("--login-method METHOD", [:cookie, :http, :url],
+						"Select the login method (cookie, http, url)") { |v| options[:login_method] = v }
 		opts.on("-n", "--no-cache", "Don't use the cache - this will cause a significantly higher load on the server. (default: use cache)") do |c|
 			options[:nocache] = c
 		end
